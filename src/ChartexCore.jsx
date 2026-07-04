@@ -1,340 +1,240 @@
-import { useEffect, useRef, useState } from "react";
-import * as THREE from "three";
+import { useEffect, useState, useRef } from "react";
 
-const BOTS = [
-  { key: "bumble", name: "BUMBLE", role: "Market Scanner", color: "#F5C542", glow: "rgba(245,197,66,0.55)", pos: { top: "10%", left: "8%" }, status: "Scanning 9 pairs" },
-  { key: "oracle", name: "ORACLE", role: "Probability Engine", color: "#34D399", glow: "rgba(52,211,153,0.55)", pos: { top: "10%", right: "8%" }, status: "Learning" },
-  { key: "sentinel", name: "SENTINEL", role: "Risk Intelligence", color: "#A78BFA", glow: "rgba(167,139,250,0.55)", pos: { bottom: "10%", left: "8%" }, status: "Calculating risk" },
-  { key: "guardian", name: "GUARDIAN", role: "Trade Protection", color: "#F87171", glow: "rgba(248,113,113,0.55)", pos: { bottom: "10%", right: "8%" }, status: "Standing guard" },
-  { key: "titan", name: "TITAN", role: "Swing Specialist", color: "#38BDF8", glow: "rgba(56,189,248,0.55)", pos: { top: "42%", left: "3%" }, status: "Reading 4H structure" },
-  { key: "viper", name: "VIPER", role: "Scalp Specialist", color: "#E879F9", glow: "rgba(232,121,249,0.55)", pos: { top: "42%", right: "3%" }, status: "Awaiting alignment" },
-];
+// ── Design tokens ────────────────────────────────────────────────────
+const C = {
+  bg: "#0A0E14", panel: "#0D1219", panelBorder: "rgba(103,232,249,0.12)",
+  cyan: "#22D3EE", green: "#34D399", amber: "#F59E0B", red: "#F87171",
+  text: "#E2E8F0", textDim: "#64748B", textFaint: "#3F4A5A",
+};
 
-export default function ChartexCore() {
-  const mountRef = useRef(null);
-  const stateRef = useRef({ activity: 0.4, pulseRequests: [] });
-  const [log, setLog] = useState([
-    { id: 1, text: "System initialized — 6 agents online" },
-  ]);
+// ── REAL bot7 data source ────────────────────────────────────────────
+// bot7 uploads to Supabase STORAGE (not a database table) -- a plain
+// JSON file object, publicly readable. No auth needed for a GET.
+const STATUS_URL = "https://wmrjaomsxqgmbbfevcgl.supabase.co/storage/v1/object/public/bot-status/live.json";
+const STALE_THRESHOLD_MS = 3 * 60 * 1000; // bot7 writes ~every 60s; 3min silence = really offline
+
+async function fetchLiveState() {
+  const res = await fetch(`${STATUS_URL}?t=${Date.now()}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+// Maps bot7's real status JSON into what this UI displays. ONLY fields
+// confirmed to exist in bot7's actual upload are used here -- nothing
+// is invented to fill a prettier layout. If bot7's schema changes,
+// only this function needs updating.
+function mapBot7Status(raw) {
+  return {
+    balance: raw.balance ?? null,
+    dayPnl: raw.daily_pnl ?? null,
+    weeklyPnl: raw.weekly_pnl ?? null,
+    tradesThisCycle: raw.entered_this_cycle ?? 0,
+    btcBias: raw.btc_bias ?? "UNKNOWN",
+    minConfluence: raw.min_confluence ?? null,
+    botVersion: raw.bot_version ?? null,
+    engines: raw.engines ?? [],
+    openPositions: raw.open_positions ?? [],
+    oracle: {
+      totalTrades: raw.oracle_summary?.total_trades ?? 0,
+      winRate: raw.oracle_summary?.win_rate ?? null,
+      totalPnl: raw.oracle_summary?.total_pnl ?? null,
+      wins: raw.oracle_summary?.wins ?? 0,
+      losses: raw.oracle_summary?.losses ?? 0,
+    },
+    lastScan: raw.last_scan ?? null,
+  };
+}
+
+function timeAgo(iso) {
+  if (!iso) return "never";
+  const diffSec = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (diffSec < 60) return `${Math.floor(diffSec)}s ago`;
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+  return `${Math.floor(diffSec / 3600)}h ago`;
+}
+function fmtTime(d) { return d.toLocaleTimeString("en-GB", { hour12: false }); }
+
+export default function ChartexCoreDashboard() {
+  const [state, setState] = useState(null);
+  const [connStatus, setConnStatus] = useState("connecting"); // connecting | live | stale | error
+  const [errorMsg, setErrorMsg] = useState(null);
   const [clock, setClock] = useState(new Date());
-  const [pulseKey, setPulseKey] = useState(0);
-  const [activeBeam, setActiveBeam] = useState(null);
+  const [syncLog, setSyncLog] = useState([]);
+  const logEndRef = useRef(null);
 
   useEffect(() => {
     const t = setInterval(() => setClock(new Date()), 1000);
     return () => clearInterval(t);
   }, []);
 
-  // ── THREE.JS SCENE ────────────────────────────────────────────────
   useEffect(() => {
-    const mount = mountRef.current;
-    const width = mount.clientWidth;
-    const height = mount.clientHeight;
-
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
-    camera.position.set(0, 0.4, 7.5);
-
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    renderer.setSize(width, height);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    mount.appendChild(renderer.domElement);
-
-    // Core group
-    const core = new THREE.Group();
-    scene.add(core);
-
-    // Layer 1 — outer wireframe shell, cyan
-    const outerGeo = new THREE.IcosahedronGeometry(1.9, 0);
-    const outerMat = new THREE.MeshBasicMaterial({ color: 0x22d3ee, wireframe: true, transparent: true, opacity: 0.35 });
-    const outerShell = new THREE.Mesh(outerGeo, outerMat);
-    core.add(outerShell);
-
-    // Layer 2 — middle wireframe shell, blue, counter-rotating
-    const midGeo = new THREE.IcosahedronGeometry(1.35, 0);
-    const midMat = new THREE.MeshBasicMaterial({ color: 0x3b82f6, wireframe: true, transparent: true, opacity: 0.5 });
-    const midShell = new THREE.Mesh(midGeo, midMat);
-    core.add(midShell);
-
-    // Layer 3 — inner solid glowing crystal
-    const innerGeo = new THREE.IcosahedronGeometry(0.75, 1);
-    const innerMat = new THREE.MeshStandardMaterial({
-      color: 0x0ea5e9, emissive: 0x22d3ee, emissiveIntensity: 1.1,
-      metalness: 0.3, roughness: 0.25, flatShading: true,
-    });
-    const innerCrystal = new THREE.Mesh(innerGeo, innerMat);
-    core.add(innerCrystal);
-
-    // Point light inside the core so the crystal actually glows
-    const coreLight = new THREE.PointLight(0x22d3ee, 3.5, 8);
-    core.add(coreLight);
-    const rimLight = new THREE.PointLight(0x3b82f6, 1.5, 12);
-    rimLight.position.set(3, 2, 3);
-    scene.add(rimLight);
-
-    // Orbiting particle shell
-    const particleCount = 260;
-    const particlePositions = new Float32Array(particleCount * 3);
-    for (let i = 0; i < particleCount; i++) {
-      const r = 2.6 + Math.random() * 0.9;
-      const theta = Math.random() * Math.PI * 2;
-      const phi = Math.acos(2 * Math.random() - 1);
-      particlePositions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
-      particlePositions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
-      particlePositions[i * 3 + 2] = r * Math.cos(phi);
-    }
-    const particleGeo = new THREE.BufferGeometry();
-    particleGeo.setAttribute("position", new THREE.BufferAttribute(particlePositions, 3));
-    const particleMat = new THREE.PointsMaterial({ color: 0x67e8f9, size: 0.028, transparent: true, opacity: 0.75 });
-    const particles = new THREE.Points(particleGeo, particleMat);
-    scene.add(particles);
-
-    // Deep background starfield
-    const starCount = 900;
-    const starPositions = new Float32Array(starCount * 3);
-    for (let i = 0; i < starCount; i++) {
-      starPositions[i * 3] = (Math.random() - 0.5) * 40;
-      starPositions[i * 3 + 1] = (Math.random() - 0.5) * 40;
-      starPositions[i * 3 + 2] = (Math.random() - 0.5) * 40 - 5;
-    }
-    const starGeo = new THREE.BufferGeometry();
-    starGeo.setAttribute("position", new THREE.BufferAttribute(starPositions, 3));
-    const starMat = new THREE.PointsMaterial({ color: 0x64748b, size: 0.02, transparent: true, opacity: 0.5 });
-    const stars = new THREE.Points(starGeo, starMat);
-    scene.add(stars);
-
-    // Pulse rings — created on demand when a "trade signal" fires
-    const pulseRings = [];
-    function spawnPulseRing() {
-      const geo = new THREE.RingGeometry(0.9, 1.0, 64);
-      const mat = new THREE.MeshBasicMaterial({ color: 0x67e8f9, transparent: true, opacity: 0.8, side: THREE.DoubleSide });
-      const ring = new THREE.Mesh(geo, mat);
-      ring.rotation.x = Math.PI / 2.4;
-      scene.add(ring);
-      pulseRings.push({ mesh: ring, life: 0 });
-    }
-    stateRef.current.spawnPulseRing = spawnPulseRing;
-
-    let frameId;
-    const clockObj = new THREE.Clock();
-
-    function animate() {
-      frameId = requestAnimationFrame(animate);
-      const dt = clockObj.getDelta();
-      const t = clockObj.getElapsedTime();
-      const activity = stateRef.current.activity;
-
-      outerShell.rotation.y += dt * 0.12;
-      outerShell.rotation.x += dt * 0.04;
-      midShell.rotation.y -= dt * 0.22;
-      midShell.rotation.z += dt * 0.05;
-      innerCrystal.rotation.y += dt * 0.35;
-      innerCrystal.rotation.x += dt * 0.15;
-
-      // breathing — scale + emissive tied to "activity"
-      const breathe = 1 + Math.sin(t * 1.4) * 0.04 * (0.5 + activity);
-      innerCrystal.scale.setScalar(breathe);
-      innerMat.emissiveIntensity = 0.8 + activity * 1.4 + Math.sin(t * 2.2) * 0.15;
-      coreLight.intensity = 2.5 + activity * 3;
-
-      particles.rotation.y += dt * (0.05 + activity * 0.08);
-      particles.rotation.x += dt * 0.01;
-      stars.rotation.y += dt * 0.003;
-
-      for (let i = pulseRings.length - 1; i >= 0; i--) {
-        const p = pulseRings[i];
-        p.life += dt;
-        const s = 1 + p.life * 3.2;
-        p.mesh.scale.set(s, s, s);
-        p.mesh.material.opacity = Math.max(0, 0.8 - p.life * 0.9);
-        if (p.life > 1.1) {
-          scene.remove(p.mesh);
-          pulseRings.splice(i, 1);
-        }
+    let cancelled = false;
+    async function poll() {
+      try {
+        const raw = await fetchLiveState();
+        if (cancelled) return;
+        const mapped = mapBot7Status(raw);
+        setState(mapped);
+        setErrorMsg(null);
+        const ageMs = mapped.lastScan ? Date.now() - new Date(mapped.lastScan).getTime() : Infinity;
+        setConnStatus(ageMs > STALE_THRESHOLD_MS ? "stale" : "live");
+        setSyncLog((l) => [...l, {
+          time: fmtTime(new Date()), ok: true,
+          msg: `Synced -- last bot7 scan ${timeAgo(mapped.lastScan)}, balance $${mapped.balance?.toFixed(2) ?? "?"}`,
+        }].slice(-30));
+      } catch (err) {
+        if (cancelled) return;
+        setConnStatus("error");
+        setErrorMsg(err.message);
+        setSyncLog((l) => [...l, { time: fmtTime(new Date()), ok: false, msg: `Fetch failed -- ${err.message}` }].slice(-30));
       }
-
-      renderer.render(scene, camera);
     }
-    animate();
-
-    function handleResize() {
-      const w = mount.clientWidth, h = mount.clientHeight;
-      camera.aspect = w / h;
-      camera.updateProjectionMatrix();
-      renderer.setSize(w, h);
-    }
-    window.addEventListener("resize", handleResize);
-
-    return () => {
-      cancelAnimationFrame(frameId);
-      window.removeEventListener("resize", handleResize);
-      mount.removeChild(renderer.domElement);
-      outerGeo.dispose(); outerMat.dispose();
-      midGeo.dispose(); midMat.dispose();
-      innerGeo.dispose(); innerMat.dispose();
-      particleGeo.dispose(); particleMat.dispose();
-      starGeo.dispose(); starMat.dispose();
-    };
+    poll();
+    const cycle = setInterval(poll, 15000);
+    return () => { cancelled = true; clearInterval(cycle); };
   }, []);
 
-  // Simulate ambient activity drifting, occasionally spiking
-  useEffect(() => {
-    const t = setInterval(() => {
-      stateRef.current.activity = Math.max(0.15, Math.min(1, stateRef.current.activity + (Math.random() - 0.5) * 0.15));
-    }, 900);
-    return () => clearInterval(t);
-  }, []);
+  useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [syncLog]);
 
-  function fireSignal() {
-    const bot = BOTS[Math.floor(Math.random() * BOTS.length)];
-    stateRef.current.spawnPulseRing?.();
-    stateRef.current.activity = 1;
-    setActiveBeam(bot.key);
-    setPulseKey((k) => k + 1);
-    setLog((prev) => [
-      { id: Date.now(), text: `${bot.name} → Core: signal transmitted (${bot.status})` },
-      ...prev,
-    ].slice(0, 6));
-    setTimeout(() => setActiveBeam(null), 1400);
-  }
-
-  const timeStr = clock.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const offline = connStatus === "error" || connStatus === "stale";
+  const statusColor = connStatus === "live" ? C.green : connStatus === "connecting" ? C.textDim : C.red;
+  const statusLabel = { live: "LIVE", connecting: "CONNECTING...", stale: "STALE -- BOT7 NOT RESPONDING", error: "OFFLINE -- CANNOT REACH BOT7" }[connStatus];
 
   return (
-    <div style={{ position: "relative", width: "100%", height: "100vh", background: "#03050A", overflow: "hidden", fontFamily: "'JetBrains Mono', 'Courier New', monospace" }}>
+    <div style={{ background: C.bg, minHeight: "100vh", color: C.text, fontFamily: "'JetBrains Mono','Courier New',monospace", fontSize: 12 }}>
       <style>{`
-        @keyframes floatCard { 0%,100% { transform: translateY(0px); } 50% { transform: translateY(-6px); } }
-        @keyframes beamFlow { 0% { background-position: 0% 0%; } 100% { background-position: 200% 0%; } }
-        @keyframes dotPulse { 0%,100% { opacity: 1; box-shadow: 0 0 6px currentColor; } 50% { opacity: 0.4; box-shadow: 0 0 2px currentColor; } }
-        @keyframes fadeSlide { from { opacity: 0; transform: translateY(-4px);} to { opacity:1; transform: translateY(0);} }
-
-        .topbar { display: flex; flex-wrap: wrap; row-gap: 8px; justify-content: space-between; align-items: center; }
-        .topbar-brand { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-        .topbar-stats { display: flex; gap: 22px; flex-wrap: wrap; justify-content: flex-end; }
-        @media (max-width: 640px) {
-          .topbar-stats { gap: 12px; justify-content: flex-start; width: 100%; }
-          .topbar-brand .mission-status { display: none; }
-        }
-        @media (max-width: 420px) {
-          .topbar-stats .stat-label { font-size: 8px !important; }
-          .topbar-stats .stat-value { font-size: 10.5px !important; }
-        }
+        * { box-sizing: border-box; }
+        .panel { background: ${C.panel}; border: 1px solid ${C.panelBorder}; border-radius: 6px; }
+        .panel-title { color: ${C.cyan}; font-size: 11px; letter-spacing: 1px; font-weight: 600; padding: 10px 12px; border-bottom: 1px solid ${C.panelBorder}; }
+        table { width: 100%; border-collapse: collapse; }
+        th { text-align: left; color: ${C.textFaint}; font-size: 9px; letter-spacing: 0.5px; padding: 6px 10px; font-weight: 500; }
+        td { padding: 6px 10px; font-size: 11px; border-top: 1px solid rgba(255,255,255,0.03); }
+        ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-thumb { background: ${C.panelBorder}; border-radius: 3px; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+        .live-dot { animation: pulse 1.6s infinite; }
       `}</style>
 
-      {/* Deep vignette + fog overlay */}
-      <div style={{ position: "absolute", inset: 0, background: "radial-gradient(ellipse at center, rgba(10,20,35,0) 0%, rgba(2,4,9,0.9) 78%)", pointerEvents: "none", zIndex: 2 }} />
-
-      {/* Three.js mount */}
-      <div ref={mountRef} style={{ position: "absolute", inset: 0, zIndex: 1 }} />
-
       {/* Top bar */}
-      <div className="topbar" style={{
-        position: "absolute", top: 0, left: 0, right: 0, zIndex: 5,
-        padding: "12px 18px", background: "rgba(6,10,20,0.55)", backdropFilter: "blur(10px)",
-        borderBottom: "1px solid rgba(103,232,249,0.15)",
-      }}>
-        <div className="topbar-brand">
-          <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#34D399", animation: "dotPulse 2s infinite", color: "#34D399", flexShrink: 0 }} />
-          <span style={{ color: "#e2e8f0", fontSize: 13, letterSpacing: 3, fontWeight: 600, whiteSpace: "nowrap" }}>CHARTEX <span style={{ color: "#22D3EE" }}>OS</span></span>
-          <span className="mission-status" style={{ color: "#64748b", fontSize: 11, marginLeft: 4, whiteSpace: "nowrap" }}>MISSION STATUS: <span style={{ color: "#34D399" }}>NOMINAL</span></span>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", borderBottom: `1px solid ${C.panelBorder}`, flexWrap: "wrap", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+          <span style={{ fontWeight: 700, fontSize: 14, letterSpacing: 1 }}>CHARTEX CORE</span>
+          <span style={{ display: "flex", alignItems: "center", gap: 6, color: statusColor }}>
+            <span className="live-dot" style={{ width: 7, height: 7, borderRadius: "50%", background: statusColor }} />
+            BOT7 -- {statusLabel}
+          </span>
+          {state?.botVersion && <span style={{ color: C.textFaint }}>v{state.botVersion}</span>}
         </div>
-        <div className="topbar-stats">
-          <Stat label="BALANCE" value="$103.51" color="#e2e8f0" />
-          <Stat label="DAILY P&L" value="+3.39" color="#34D399" />
-          <Stat label="RISK" value="1.4%" color="#F5C542" />
-          <Stat label="LATENCY" value="42ms" color="#22D3EE" />
-          <Stat label="TIME" value={timeStr} color="#e2e8f0" />
-        </div>
+        <div style={{ color: C.textDim }}>{fmtTime(clock)}</div>
       </div>
 
-      {/* Bot modules + beams */}
-      {BOTS.map((bot) => (
-        <BotModule key={bot.key} bot={bot} active={activeBeam === bot.key} />
-      ))}
+      {offline && (
+        <div style={{ background: "rgba(248,113,113,0.08)", borderBottom: `1px solid ${C.red}`, padding: "8px 16px", color: C.red, fontSize: 11 }}>
+          {connStatus === "error"
+            ? `Cannot reach bot7's status feed (${errorMsg}). Showing last known data below, if any.`
+            : `bot7 hasn't updated its status in over 3 minutes. It may have stopped, lost network, or hit an error. Showing last known data below.`}
+        </div>
+      )}
 
-      {/* Center label under core */}
-      <div style={{
-        position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, 118px)",
-        textAlign: "center", zIndex: 4, pointerEvents: "none",
-      }}>
-        <div style={{ color: "#67e8f9", fontSize: 11, letterSpacing: 4, opacity: 0.85 }}>MARKET INTELLIGENCE CORE</div>
-        <div style={{ color: "#475569", fontSize: 10, letterSpacing: 2, marginTop: 2 }}>6 AGENTS SYNCHRONIZED</div>
-      </div>
-
-      {/* Trigger button */}
-      <button
-        onClick={fireSignal}
-        style={{
-          position: "absolute", left: "50%", bottom: 108, transform: "translateX(-50%)", zIndex: 6,
-          padding: "9px 22px", borderRadius: 999, border: "1px solid rgba(103,232,249,0.4)",
-          background: "rgba(34,211,238,0.08)", color: "#67e8f9", fontSize: 11, letterSpacing: 2,
-          cursor: "pointer", backdropFilter: "blur(6px)", transition: "all 0.2s",
-        }}
-        onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(34,211,238,0.18)"; e.currentTarget.style.boxShadow = "0 0 24px rgba(34,211,238,0.35)"; }}
-        onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(34,211,238,0.08)"; e.currentTarget.style.boxShadow = "none"; }}
-      >
-        ⚡ SIMULATE TRADE SIGNAL
-      </button>
-
-      {/* Fleet timeline strip */}
-      <div style={{
-        position: "absolute", bottom: 0, left: 0, right: 0, zIndex: 5,
-        background: "rgba(6,10,20,0.6)", backdropFilter: "blur(10px)",
-        borderTop: "1px solid rgba(103,232,249,0.12)", padding: "10px 20px",
-        display: "flex", flexDirection: "column", gap: 3, maxHeight: 92, overflow: "hidden",
-      }}>
-        {log.map((l, i) => (
-          <div key={l.id} style={{
-            fontSize: 10.5, color: i === 0 ? "#67e8f9" : "#475569", letterSpacing: 0.5,
-            animation: i === 0 ? "fadeSlide 0.4s ease-out" : "none",
-          }}>
-            <span style={{ opacity: 0.5 }}>▸</span> {l.text}
+      {!state ? (
+        <div style={{ padding: 40, textAlign: "center", color: C.textDim }}>Connecting to bot7...</div>
+      ) : (
+        <>
+          {/* Stat strip -- only real fields */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px,1fr))", gap: 1, background: C.panelBorder, borderBottom: `1px solid ${C.panelBorder}` }}>
+            <Stat label="BALANCE" value={state.balance != null ? `$${state.balance.toFixed(2)}` : "--"} color={C.text} />
+            <Stat label="DAILY P/L" value={state.dayPnl != null ? `$${state.dayPnl.toFixed(2)}` : "--"} color={state.dayPnl >= 0 ? C.green : C.red} />
+            <Stat label="WEEKLY P/L" value={state.weeklyPnl != null ? `$${state.weeklyPnl.toFixed(2)}` : "--"} color={state.weeklyPnl >= 0 ? C.green : C.red} />
+            <Stat label="OPEN POSITIONS" value={state.openPositions.length} color={C.cyan} />
+            <Stat label="BTC BIAS" value={state.btcBias} color={state.btcBias === "LONG" ? C.green : state.btcBias === "SHORT" ? C.red : C.textDim} />
+            <Stat label="MIN CONFLUENCE" value={state.minConfluence != null ? `${state.minConfluence}/13` : "--"} color={C.amber} />
+            <Stat label="LAST SCAN" value={timeAgo(state.lastScan)} color={offline ? C.red : C.textDim} />
           </div>
-        ))}
-      </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, padding: 10 }}>
+            {/* LEFT: Open Positions + Engines */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div className="panel">
+                <div className="panel-title">OPEN POSITIONS</div>
+                <table>
+                  <thead><tr><th>SYMBOL</th><th>DIR</th><th>ENTRY</th><th>SL</th><th>TP</th><th>CONF</th><th>VOTES</th></tr></thead>
+                  <tbody>
+                    {state.openPositions.length === 0 && (
+                      <tr><td colSpan={7} style={{ color: C.textFaint, textAlign: "center", padding: 16 }}>No open positions</td></tr>
+                    )}
+                    {state.openPositions.map((p, i) => (
+                      <tr key={i}>
+                        <td style={{ color: C.cyan }}>{p.symbol}</td>
+                        <td style={{ color: p.direction === "LONG" ? C.green : C.red }}>{p.direction}</td>
+                        <td>{p.entry}</td>
+                        <td style={{ color: C.red }}>{p.sl}</td>
+                        <td style={{ color: C.green }}>{p.tp}</td>
+                        <td>{p.confidence}%</td>
+                        <td>{p.vote_score}/13</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="panel" style={{ padding: 10 }}>
+                <div style={{ color: C.cyan, fontSize: 11, letterSpacing: 1, marginBottom: 8 }}>ENGINES</div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {state.engines.map((e) => (
+                    <span key={e} style={{ background: "rgba(34,211,238,0.08)", color: C.cyan, padding: "4px 10px", borderRadius: 4, fontSize: 10 }}>{e}</span>
+                  ))}
+                  {state.engines.length === 0 && <span style={{ color: C.textFaint }}>No engine data reported</span>}
+                </div>
+              </div>
+            </div>
+
+            {/* RIGHT: Oracle + Sync Log */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div className="panel" style={{ padding: 10 }}>
+                <div style={{ color: C.cyan, fontSize: 11, letterSpacing: 1, marginBottom: 10 }}>ORACLE -- REAL TRADE HISTORY</div>
+                <RiskRow label="TOTAL TRADES JOURNALED" value={state.oracle.totalTrades} />
+                <RiskRow label="WIN RATE" value={state.oracle.winRate != null ? `${state.oracle.winRate}%` : "Not enough data yet"} color={state.oracle.winRate != null ? C.green : C.textFaint} />
+                <RiskRow label="WINS / LOSSES" value={`${state.oracle.wins} / ${state.oracle.losses}`} />
+                <RiskRow label="TOTAL PNL" value={state.oracle.totalPnl != null ? `$${state.oracle.totalPnl.toFixed(2)}` : "--"} color={state.oracle.totalPnl >= 0 ? C.green : C.red} />
+                {state.oracle.totalTrades < 10 && (
+                  <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${C.panelBorder}`, color: C.textFaint, fontSize: 10 }}>
+                    Below 10 trades -- Oracle itself won't speak with confidence yet, and neither should this dashboard.
+                  </div>
+                )}
+              </div>
+
+              <div className="panel" style={{ display: "flex", flexDirection: "column", height: 280 }}>
+                <div className="panel-title">DASHBOARD SYNC LOG</div>
+                <div style={{ flex: 1, overflowY: "auto", padding: "8px 12px", fontSize: 10.5, lineHeight: 1.7 }}>
+                  {syncLog.map((l, i) => (
+                    <div key={i} style={{ color: l.ok ? C.textDim : C.red }}>
+                      [{l.time}] {l.msg}
+                    </div>
+                  ))}
+                  <div ref={logEndRef} />
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
 
 function Stat({ label, value, color }) {
   return (
-    <div style={{ textAlign: "right" }}>
-      <div className="stat-label" style={{ fontSize: 9, color: "#475569", letterSpacing: 1, whiteSpace: "nowrap" }}>{label}</div>
-      <div className="stat-value" style={{ fontSize: 12, color, fontWeight: 600, whiteSpace: "nowrap" }}>{value}</div>
+    <div style={{ background: C.panel, padding: "8px 14px" }}>
+      <div style={{ color: C.textFaint, fontSize: 9, letterSpacing: 0.5 }}>{label}</div>
+      <div style={{ color, fontWeight: 700, fontSize: 13 }}>{value}</div>
     </div>
   );
 }
 
-function BotModule({ bot, active }) {
-  const isRight = "right" in bot.pos;
-  const isTop = "top" in bot.pos;
+function RiskRow({ label, value, color = C.text }) {
   return (
-    <div style={{ position: "absolute", zIndex: 4, ...bot.pos, animation: "floatCard 5.5s ease-in-out infinite" }}>
-      {/* Beam toward center */}
-      <div style={{
-        position: "absolute", top: "50%", [isRight ? "right" : "left"]: "100%",
-        width: 140, height: 2, transformOrigin: isRight ? "right center" : "left center",
-        transform: `translateY(-50%) rotate(${isTop ? (isRight ? 32 : -32) : (isRight ? -32 : 32)}deg) ${isTop ? "" : "scaleY(1)"}`,
-        background: `linear-gradient(90deg, ${bot.color}00, ${bot.color}${active ? "ff" : "55"} 40%, ${bot.color}00)`,
-        backgroundSize: "200% 100%",
-        animation: active ? "beamFlow 0.6s linear infinite" : "beamFlow 3s linear infinite",
-        opacity: active ? 1 : 0.35,
-        transition: "opacity 0.3s",
-      }} />
-      <div style={{
-        width: 148, padding: "10px 12px", borderRadius: 10,
-        background: "rgba(8,12,22,0.65)", backdropFilter: "blur(8px)",
-        border: `1px solid ${bot.color}${active ? "cc" : "33"}`,
-        boxShadow: active ? `0 0 26px ${bot.glow}` : `0 0 14px ${bot.glow}`,
-        transition: "box-shadow 0.3s, border-color 0.3s",
-      }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3 }}>
-          <div style={{ width: 6, height: 6, borderRadius: "50%", background: bot.color, animation: "dotPulse 1.8s infinite", color: bot.color }} />
-          <span style={{ fontSize: 11, fontWeight: 700, color: bot.color, letterSpacing: 1.5 }}>{bot.name}</span>
-        </div>
-        <div style={{ fontSize: 9, color: "#94a3b8", marginBottom: 5 }}>{bot.role}</div>
-        <div style={{ fontSize: 9.5, color: "#cbd5e1" }}>{active ? "Signal transmitted →" : bot.status}</div>
-      </div>
+    <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", fontSize: 11 }}>
+      <span style={{ color: C.textDim }}>{label}</span>
+      <span style={{ color, fontWeight: 600 }}>{value}</span>
     </div>
   );
 }

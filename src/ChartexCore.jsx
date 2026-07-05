@@ -4,7 +4,7 @@ import { useEffect, useState, useRef } from "react";
 const C = {
   bg: "#0A0E14", panel: "#0D1219", panelBorder: "rgba(103,232,249,0.12)",
   cyan: "#22D3EE", green: "#34D399", amber: "#F59E0B", red: "#F87171",
-  text: "#E2E8F0", textDim: "#64748B", textFaint: "#3F4A5A",
+  text: "#F1F5F9", textDim: "#94A3B8", textFaint: "#8494AC",
 };
 
 // ── REAL bot7 data source ────────────────────────────────────────────
@@ -101,17 +101,25 @@ export default function ChartexCoreDashboard() {
   const statusLabel = { live: "LIVE", connecting: "CONNECTING...", stale: "STALE -- BOT7 NOT RESPONDING", error: "OFFLINE -- CANNOT REACH BOT7" }[connStatus];
 
   return (
-    <div style={{ background: C.bg, minHeight: "100vh", color: C.text, fontFamily: "'JetBrains Mono','Courier New',monospace", fontSize: 12 }}>
+    <div style={{ background: C.bg, minHeight: "100vh", color: C.text, fontFamily: "'JetBrains Mono','Courier New',monospace", fontSize: 13 }}>
       <style>{`
         * { box-sizing: border-box; }
-        .panel { background: ${C.panel}; border: 1px solid ${C.panelBorder}; border-radius: 6px; }
-        .panel-title { color: ${C.cyan}; font-size: 11px; letter-spacing: 1px; font-weight: 600; padding: 10px 12px; border-bottom: 1px solid ${C.panelBorder}; }
-        table { width: 100%; border-collapse: collapse; }
-        th { text-align: left; color: ${C.textFaint}; font-size: 9px; letter-spacing: 0.5px; padding: 6px 10px; font-weight: 500; }
-        td { padding: 6px 10px; font-size: 11px; border-top: 1px solid rgba(255,255,255,0.03); }
-        ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-thumb { background: ${C.panelBorder}; border-radius: 3px; }
+        html, body { overflow-x: hidden; max-width: 100vw; }
+        .panel { background: ${C.panel}; border: 1px solid ${C.panelBorder}; border-radius: 6px; min-width: 0; }
+        .panel-title { color: ${C.cyan}; font-size: 12px; letter-spacing: 1px; font-weight: 600; padding: 10px 12px; border-bottom: 1px solid ${C.panelBorder}; }
+        .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+        table { width: 100%; border-collapse: collapse; min-width: 480px; }
+        th { text-align: left; color: ${C.textFaint}; font-size: 10px; letter-spacing: 0.5px; padding: 6px 10px; font-weight: 500; white-space: nowrap; }
+        td { padding: 6px 10px; font-size: 12px; border-top: 1px solid rgba(255,255,255,0.03); white-space: nowrap; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; } ::-webkit-scrollbar-thumb { background: ${C.panelBorder}; border-radius: 3px; }
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
         .live-dot { animation: pulse 1.6s infinite; }
+        /* Below ~768px, stop forcing two equal columns -- stack them instead.
+           This is the fix for the mobile bug where both columns got squeezed
+           to half-width, causing text to overlap and words to jam together. */
+        @media (max-width: 768px) {
+          .main-grid { grid-template-columns: 1fr !important; }
+        }
       `}</style>
 
       {/* Top bar */}
@@ -128,7 +136,7 @@ export default function ChartexCoreDashboard() {
       </div>
 
       {offline && (
-        <div style={{ background: "rgba(248,113,113,0.08)", borderBottom: `1px solid ${C.red}`, padding: "8px 16px", color: C.red, fontSize: 11 }}>
+        <div style={{ background: "rgba(248,113,113,0.08)", borderBottom: `1px solid ${C.red}`, padding: "8px 16px", color: C.red, fontSize: 12 }}>
           {connStatus === "error"
             ? `Cannot reach bot7's status feed (${errorMsg}). Showing last known data below, if any.`
             : `bot7 hasn't updated its status in over 3 minutes. It may have stopped, lost network, or hit an error. Showing last known data below.`}
@@ -150,11 +158,12 @@ export default function ChartexCoreDashboard() {
             <Stat label="LAST SCAN" value={timeAgo(state.lastScan)} color={offline ? C.red : C.textDim} />
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, padding: 10 }}>
+          <div className="main-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, padding: 10 }}>
             {/* LEFT: Open Positions + Engines */}
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <div className="panel">
                 <div className="panel-title">OPEN POSITIONS</div>
+                <div className="table-scroll">
                 <table>
                   <thead><tr><th>SYMBOL</th><th>DIR</th><th>ENTRY</th><th>SL</th><th>TP</th><th>CONF</th><th>VOTES</th></tr></thead>
                   <tbody>
@@ -174,10 +183,11 @@ export default function ChartexCoreDashboard() {
                     ))}
                   </tbody>
                 </table>
+                </div>
               </div>
 
               <div className="panel" style={{ padding: 10 }}>
-                <div style={{ color: C.cyan, fontSize: 11, letterSpacing: 1, marginBottom: 8 }}>ENGINES</div>
+                <div style={{ color: C.cyan, fontSize: 11, letterSpacing: 1, marginBottom: 8, fontSize: 12 }}>ENGINES</div>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   {state.engines.map((e) => (
                     <span key={e} style={{ background: "rgba(34,211,238,0.08)", color: C.cyan, padding: "4px 10px", borderRadius: 4, fontSize: 10 }}>{e}</span>
@@ -190,7 +200,7 @@ export default function ChartexCoreDashboard() {
             {/* RIGHT: Oracle + Sync Log */}
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <div className="panel" style={{ padding: 10 }}>
-                <div style={{ color: C.cyan, fontSize: 11, letterSpacing: 1, marginBottom: 10 }}>ORACLE -- REAL TRADE HISTORY</div>
+                <div style={{ color: C.cyan, fontSize: 11, letterSpacing: 1, marginBottom: 10, fontSize: 12 }}>ORACLE -- REAL TRADE HISTORY</div>
                 <RiskRow label="TOTAL TRADES JOURNALED" value={state.oracle.totalTrades} />
                 <RiskRow label="WIN RATE" value={state.oracle.winRate != null ? `${state.oracle.winRate}%` : "Not enough data yet"} color={state.oracle.winRate != null ? C.green : C.textFaint} />
                 <RiskRow label="WINS / LOSSES" value={`${state.oracle.wins} / ${state.oracle.losses}`} />
@@ -204,7 +214,7 @@ export default function ChartexCoreDashboard() {
 
               <div className="panel" style={{ display: "flex", flexDirection: "column", height: 280 }}>
                 <div className="panel-title">DASHBOARD SYNC LOG</div>
-                <div style={{ flex: 1, overflowY: "auto", padding: "8px 12px", fontSize: 10.5, lineHeight: 1.7 }}>
+                <div style={{ flex: 1, overflowY: "auto", padding: "8px 12px", fontSize: 11.5, lineHeight: 1.7 }}>
                   {syncLog.map((l, i) => (
                     <div key={i} style={{ color: l.ok ? C.textDim : C.red }}>
                       [{l.time}] {l.msg}
@@ -224,7 +234,7 @@ export default function ChartexCoreDashboard() {
 function Stat({ label, value, color }) {
   return (
     <div style={{ background: C.panel, padding: "8px 14px" }}>
-      <div style={{ color: C.textFaint, fontSize: 9, letterSpacing: 0.5 }}>{label}</div>
+      <div style={{ color: C.textFaint, fontSize: 10, letterSpacing: 0.5 }}>{label}</div>
       <div style={{ color, fontWeight: 700, fontSize: 13 }}>{value}</div>
     </div>
   );
@@ -232,7 +242,7 @@ function Stat({ label, value, color }) {
 
 function RiskRow({ label, value, color = C.text }) {
   return (
-    <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", fontSize: 11 }}>
+    <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", fontSize: 12 }}>
       <span style={{ color: C.textDim }}>{label}</span>
       <span style={{ color, fontWeight: 600 }}>{value}</span>
     </div>
